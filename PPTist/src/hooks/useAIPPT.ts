@@ -404,6 +404,9 @@ export default () => {
         const elements = contentsTemplate.elements.map(el => {
           if (el.type === 'image' && el.imageType && imgPool.value.length) return getNewImgElement(el)
           if (el.type !== 'text' && el.type !== 'shape') return el
+          if (checkTextType(el, 'title')) {
+            return getNewTextElement({ el: el as any, text: '目录', maxLine: 1 })
+          }
           if (checkTextType(el, 'item')) {
             const index = sortedItemIds.findIndex(id => id === el.id)
             const itemTitle = item.data.items[index]
@@ -450,6 +453,46 @@ export default () => {
       else if (item.type === 'content') {
         const _contentTemplates = getUseableTemplates(contentTemplates, item.data.items.length, 'item')
         const contentTemplate = _contentTemplates[Math.floor(Math.random() * _contentTemplates.length)]
+
+        const hasItemPlaceholders = contentTemplate.elements.some(el => checkTextType(el, 'item') || checkTextType(el, 'itemTitle') || checkTextType(el, 'itemNumber'))
+        const hasContentPlaceholder = contentTemplate.elements.some(el => checkTextType(el, 'content'))
+        const itemCount = contentTemplate.elements.filter(el => checkTextType(el, 'item')).length
+
+        // 对于本地 PPTX 模板，可能无法可靠识别/标注 itemTitle/item。
+        // 这时优先把所有要点合并写入 content 文本框，避免误用模板里的装饰性小字。
+        // 若缺少可用于承载“正文”的 item 文本框（常见于本地 PPTX 模板只有 itemTitle 小标题），则把要点合并写入 content。
+        if (hasContentPlaceholder && item.data.items.length > 1 && (!hasItemPlaceholders || itemCount === 0)) {
+          const merged = item.data.items
+            .map(it => {
+              const title = (it.title || '').trim()
+              const text = (it.text || '').trim()
+              if (title && text) return `• ${title}：${text}`
+              if (title) return `• ${title}`
+              if (text) return `• ${text}`
+              return ''
+            })
+            .filter(Boolean)
+            .join('\n')
+
+          const elements = contentTemplate.elements.map(el => {
+            if (el.type === 'image' && el.imageType && imgPool.value.length) return getNewImgElement(el)
+            if (el.type !== 'text' && el.type !== 'shape') return el
+            if (checkTextType(el, 'title') && item.data.title) {
+              return getNewTextElement({ el, text: item.data.title, maxLine: 1 })
+            }
+            if (checkTextType(el, 'content') && merged) {
+              return getNewTextElement({ el, text: merged, maxLine: 12 })
+            }
+            return el
+          })
+
+          slides.push({
+            ...contentTemplate,
+            id: nanoid(10),
+            elements,
+          })
+          continue
+        }
 
         const sortedTitleItemIds = contentTemplate.elements.filter(el => checkTextType(el, 'itemTitle')).sort((a, b) => {
           const aIndex = a.left + a.top * 2
@@ -524,6 +567,15 @@ export default () => {
         const endTemplate = endTemplates[Math.floor(Math.random() * endTemplates.length)]
         const elements = endTemplate.elements.map(el => {
           if (el.type === 'image' && el.imageType && imgPool.value.length) return getNewImgElement(el)
+          if (el.type !== 'text' && el.type !== 'shape') return el
+
+          // 结束页：若模板存在可替换的标题/正文占位符，避免保留本地模板里的无关文字（如“工作计划”）
+          if (checkTextType(el, 'title')) {
+            return getNewTextElement({ el: el as any, text: '谢谢', maxLine: 1 })
+          }
+          if (checkTextType(el, 'content')) {
+            return getNewTextElement({ el: el as any, text: '', maxLine: 1 })
+          }
           return el
         })
         slides.push({

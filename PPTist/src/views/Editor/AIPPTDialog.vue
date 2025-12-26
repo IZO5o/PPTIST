@@ -2,7 +2,7 @@
   <div class="aippt-dialog">
     <div class="header">
       <span class="title">AIPPT</span>
-      <span class="subtite" v-if="step === 'template'">从下方挑选合适的模板生成PPT，或<span class="local" v-tooltip="'上传.pptist格式模板文件'" @click="uploadLocalTemplate()">使用本地模板生成</span></span>
+      <span class="subtite" v-if="step === 'template'">从下方挑选合适的模板生成PPT，或<span class="local" v-tooltip="'上传.pptist/.pptx格式模板文件'" @click="uploadLocalTemplate()">使用本地模板生成</span></span>
       <span class="subtite" v-else-if="step === 'outline'">确认下方内容大纲（点击编辑内容，右键添加/删除大纲项），开始选择模板</span>
       <span class="subtite" v-else>在下方输入您的PPT主题，并适当补充信息，如行业、岗位、学科、用途等</span>
     </div>
@@ -131,6 +131,7 @@ import type { Slide, SlideTheme } from '@/types/slides'
 import message from '@/utils/message'
 import { decrypt } from '@/utils/crypto'
 import { useMainStore, useSlidesStore } from '@/store'
+import useImport from '@/hooks/useImport'
 import Input from '@/components/Input.vue'
 import Button from '@/components/Button.vue'
 import Select from '@/components/Select.vue'
@@ -144,6 +145,7 @@ const { templates } = storeToRefs(slidesStore)
 
 const { resetSlides, isEmptySlide } = useSlideHandler()
 const { AIPPT, presetImgPool, getMdContent } = useAIPPT()
+const { parsePPTXTemplate } = useImport()
 
 const language = ref('中文')
 const style = ref('通用')
@@ -255,10 +257,27 @@ const createPPT = async (template?: { slides: Slide[], theme: SlideTheme }) => {
 
   const reader: ReadableStreamDefaultReader = stream.body.getReader()
   const decoder = new TextDecoder('utf-8')
+  let buffer = ''
   
   const readStream = () => {
     reader.read().then(({ done, value }) => {
       if (done) {
+        // flush remaining buffer
+        const rest = buffer.trim()
+        if (rest) {
+          try {
+            const cleaned = rest.replace(/```json/g, '').replace(/```/g, '').trim()
+            if (cleaned) {
+              const slide: AIPPTSlide & { error?: string } = JSON.parse(cleaned)
+              if (slide && (slide as any).error) message.error((slide as any).error)
+              else AIPPT(templateSlides, [slide])
+            }
+          }
+          catch (err) {
+            // eslint-disable-next-line
+            console.error(err)
+          }
+        }
         loading.value = false
         mainStore.setAIPPTDialogState(false)
         slidesStore.setTheme(templateTheme)
@@ -266,16 +285,25 @@ const createPPT = async (template?: { slides: Slide[], theme: SlideTheme }) => {
       }
   
       const chunk = decoder.decode(value, { stream: true })
-      try {
-        const text = chunk.replace('```json', '').replace('```', '').trim()
-        if (text) {
-          const slide: AIPPTSlide = JSON.parse(chunk)
-          AIPPT(templateSlides, [slide])
+      buffer += chunk
+
+      // 后端约定：每一页为一行 JSON，对象之间以两个换行符分隔（"\n\n"）
+      while (buffer.includes('\n\n')) {
+        const [page, ...rest] = buffer.split('\n\n')
+        buffer = rest.join('\n\n')
+
+        const cleaned = page.replace(/```json/g, '').replace(/```/g, '').trim()
+        if (!cleaned) continue
+
+        try {
+          const slide: AIPPTSlide & { error?: string } = JSON.parse(cleaned)
+          if (slide && (slide as any).error) message.error((slide as any).error)
+          else AIPPT(templateSlides, [slide])
         }
-      }
-      catch (err) {
-        // eslint-disable-next-line
-        console.error(err)
+        catch (err) {
+          // eslint-disable-next-line
+          console.error(err)
+        }
       }
 
       readStream()
@@ -287,22 +315,40 @@ const createPPT = async (template?: { slides: Slide[], theme: SlideTheme }) => {
 const uploadLocalTemplate = () => {
   const input = document.createElement('input')
   input.type = 'file'
-  input.accept = '.pptist'
+  input.accept = '.pptist,.pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation'
   input.click()
   input.addEventListener('change', e => {
     const file = (e.target as HTMLInputElement).files?.[0]
     if (file) {
-      const reader = new FileReader()
-      reader.addEventListener('load', () => {
-        try {
-          const { slides, theme } = JSON.parse(decrypt(reader.result as string))
+      const name = (file.name || '').toLowerCase()
+
+      // PPTIST：应用专属加密JSON
+      if (name.endsWith('.pptist')) {
+        const reader = new FileReader()
+        reader.addEventListener('load', () => {
+          try {
+            const { slides, theme } = JSON.parse(decrypt(reader.result as string))
+            createPPT({ slides, theme })
+          }
+          catch {
+            message.error('上传的模板文件数据异常，请重新上传或使用预置模板')
+          }
+        })
+        reader.readAsText(file)
+        return
+      }
+
+      // PPTX：解析为PPTist内部结构后作为模板
+      if (name.endsWith('.pptx')) {
+        parsePPTXTemplate([file]).then(({ slides, theme }) => {
           createPPT({ slides, theme })
-        }
-        catch {
-          message.error('上传的模板文件数据异常，请重新上传或使用预置模板')
-        }
-      })
-      reader.readAsText(file)
+        }).catch(() => {
+          message.error('无法正确读取 / 解析该PPTX文件，请更换文件或导出为PPTIST模板')
+        })
+        return
+      }
+
+      message.error('不支持的文件格式，请选择 .pptist 或 .pptx')
     }
   })
 }
